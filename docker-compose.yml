@@ -1,0 +1,176 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: talentfit-postgres
+    environment:
+      POSTGRES_USER: talentfit_user
+      POSTGRES_PASSWORD: talentfit_password
+      POSTGRES_DB: talentfit_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U talentfit_user -d talentfit_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - talentfit-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: talentfit-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - talentfit-network
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  # ChromaDB Vector Store
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: talentfit-chromadb
+    ports:
+      - "6333:6333"
+    environment:
+      CHROMA_DB_IMPL: duckdb+parquet
+      PERSIST_DIRECTORY: /chroma/data
+    volumes:
+      - chromadb_data:/chroma/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - talentfit-network
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: talentfit-backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://talentfit_user:talentfit_password@postgres:5432/talentfit_db
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CHROMADB_HOST: chromadb
+      CHROMADB_PORT: 6333
+      ENVIRONMENT: development
+      DEBUG: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app/backend
+      - ./data:/app/data
+    networks:
+      - talentfit-network
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # MCP Server
+  mcp-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mcp
+    container_name: talentfit-mcp
+    ports:
+      - "8888:8888"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      MCP_SERVER_PORT: 8888
+      ENVIRONMENT: development
+    depends_on:
+      backend:
+        condition: service_started
+    volumes:
+      - ./mcp_server:/app/mcp_server
+    networks:
+      - talentfit-network
+    command: python -m mcp_server.main
+
+  # Streamlit Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: talentfit-frontend
+    ports:
+      - "8501:8501"
+    environment:
+      BACKEND_URL: http://backend:8000
+      ENVIRONMENT: development
+    depends_on:
+      backend:
+        condition: service_started
+    volumes:
+      - ./frontend:/app/frontend
+    networks:
+      - talentfit-network
+    command: streamlit run frontend/main.py --server.port 8501 --server.address 0.0.0.0
+
+networks:
+  talentfit-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  chromadb_data:
+    driver: local
+
+# ========== USAGE ==========
+# Build all images:
+#   docker-compose build
+#
+# Start all services:
+#   docker-compose up -d
+#
+# View logs:
+#   docker-compose logs -f backend
+#
+# Stop services:
+#   docker-compose down
+#
+# Remove volumes (WARNING: deletes data):
+#   docker-compose down -v
+#
+# Scale backend (local development not recommended for production patterns):
+#   docker-compose up -d --scale backend=3
+#
+# Run database migrations:
+#   docker-compose exec backend python -m alembic upgrade head
+#
+# Create admin user:
+#   docker-compose exec backend python scripts/create_admin_user.py
+#
+# Access services:
+#   Backend API: http://localhost:8000
+#   API Docs: http://localhost:8000/docs
+#   Frontend: http://localhost:8501
+#   PostgreSQL: localhost:5432
+#   Redis: localhost:6379
+#   ChromaDB: http://localhost:6333
