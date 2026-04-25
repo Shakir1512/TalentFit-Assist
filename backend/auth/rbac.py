@@ -224,7 +224,7 @@ class AgentToolConstraint:
         "retrieve_rag_evidence": {Role.ADMIN, Role.RECRUITER, Role.HIRING_MANAGER},
         "compute_deterministic_score": {Role.ADMIN, Role.RECRUITER},
         "call_mcp_explainer": {Role.ADMIN, Role.RECRUITER},
-        "log_audit_event": {Role.ADMIN, Role.AUDITOR},
+        "log_audit_event": {Role.ADMIN, Role.RECRUITER, Role.HIRING_MANAGER, Role.AUDITOR},
         "assemble_response": {Role.ADMIN, Role.RECRUITER, Role.HIRING_MANAGER},
     }
     

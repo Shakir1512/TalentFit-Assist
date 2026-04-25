@@ -1,31 +1,29 @@
 """
-TalentFit Orchestration Agent
+TalentFit Orchestration Agent.
 
-Coordinates multi-step workflows under strict constraints.
-Acts as workflow conductor, NOT decision maker.
-
-Agent Properties:
-- Role-aware: Reads JWT role claims
-- Tool-constrained: Cannot invent tools
-- Fully auditable: Step-by-step logs
-- Deterministic: No free-form reasoning
+The agent is a deterministic workflow conductor. It validates role and policy,
+invokes approved tools in a fixed order, and records an auditable trace. It does
+not score, rank, infer skills, or modify deterministic scoring outputs.
 """
 
-from typing import Dict, List, Any, Optional
-from dataclasses import dataclass, field, asdict
+from __future__ import annotations
+
+import time
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-import json
-import uuid
+from typing import Any, Dict, List, Optional
 
-from backend.auth.rbac import User, Role, AgentToolConstraint, Permission, RBACViolation
+from backend.auth.rbac import AgentToolConstraint, Permission, RBACEnforcer, Role, User
+from backend.core.repository import InMemoryTalentRepository, score_to_dict
+from backend.core.scoring_engine import DeterministicScoringEngine, ScoringWeights
 
 
 class AgentToolName(Enum):
-    """Approved agent tools (constrained set)"""
     VALIDATE_USER_POLICY = "validate_user_policy"
-    RETRIEVE_RAG_EVIDENCE = "retrieve_rag_evidence"
     COMPUTE_DETERMINISTIC_SCORE = "compute_deterministic_score"
+    RETRIEVE_RAG_EVIDENCE = "retrieve_rag_evidence"
     CALL_MCP_EXPLAINER = "call_mcp_explainer"
     LOG_AUDIT_EVENT = "log_audit_event"
     ASSEMBLE_RESPONSE = "assemble_response"
@@ -33,7 +31,6 @@ class AgentToolName(Enum):
 
 @dataclass
 class ToolInvocation:
-    """Record of a single tool invocation"""
     tool_name: AgentToolName
     input_params: Dict[str, Any]
     output: Dict[str, Any]
@@ -44,24 +41,18 @@ class ToolInvocation:
 
 @dataclass
 class AgentExecutionTrace:
-    """Complete execution trace for auditability"""
     execution_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     started_at: datetime = field(default_factory=datetime.utcnow)
     user_id: str = ""
-    user_role: Role = None
+    user_role: Optional[Role] = None
     action: str = ""
-    
-    # Execution timeline
     tool_invocations: List[ToolInvocation] = field(default_factory=list)
-    
-    # Final state
     completed_at: Optional[datetime] = None
     success: bool = False
     error: Optional[str] = None
     final_output: Dict[str, Any] = field(default_factory=dict)
-    
+
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dict"""
         return {
             "execution_id": self.execution_id,
             "started_at": self.started_at.isoformat(),
@@ -70,375 +61,307 @@ class AgentExecutionTrace:
             "action": self.action,
             "tool_invocations": [
                 {
-                    "tool_name": inv.tool_name.value,
-                    "input_params": inv.input_params,
-                    "output": inv.output,
-                    "duration_ms": inv.duration_ms,
-                    "success": inv.success,
-                    "error": inv.error
+                    "tool_name": item.tool_name.value,
+                    "input_params": _safe_params(item.input_params),
+                    "output": item.output,
+                    "duration_ms": round(item.duration_ms, 2),
+                    "success": item.success,
+                    "error": item.error,
                 }
-                for inv in self.tool_invocations
+                for item in self.tool_invocations
             ],
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "success": self.success,
             "error": self.error,
-            "final_output": self.final_output
+            "final_output": self.final_output,
         }
+
+
+def _safe_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    safe: Dict[str, Any] = {}
+    for key, value in params.items():
+        if isinstance(value, User):
+            safe[key] = {"user_id": value.user_id, "role": value.role.value}
+        else:
+            safe[key] = value
+    return safe
 
 
 class AgentToolConstraintViolation(Exception):
-    """Raised when agent attempts to use unauthorized tool"""
-    
     def __init__(self, user_id: str, tool_name: str, role: Role):
-        self.user_id = user_id
-        self.tool_name = tool_name
-        self.role = role
-        super().__init__(
-            f"User {user_id} ({role.value}) attempted unauthorized tool: {tool_name}"
-        )
+        super().__init__(f"User {user_id} ({role.value}) cannot invoke agent tool {tool_name}")
 
 
-class MockToolExecutor:
-    """
-    Mock implementations of agent tools for demonstration.
-    In production, these would call real APIs.
-    """
-    
-    @staticmethod
-    def validate_user_policy(user: User, action: str) -> Dict[str, any]:
-        """Check if user has permission for action"""
-        permissions_map = {
-            "run_screening": Permission.RUN_SCREENING,
-            "upload_documents": Permission.UPLOAD_DOCUMENTS,
-            "view_results": Permission.VIEW_SCREENING_RESULTS,
-        }
-        
-        permission = permissions_map.get(action)
-        enforcer = RBACEnforcer()
-        
-        has_perm = enforcer.has_permission(user, permission) if permission else False
-        
+class TalentFitToolExecutor:
+    def __init__(self, repository: InMemoryTalentRepository):
+        self.repository = repository
+        self.rbac = RBACEnforcer()
+
+    def validate_user_policy(self, user: User, action: str) -> Dict[str, Any]:
+        required = {"run_screening": Permission.RUN_SCREENING}.get(action)
+        authorized = bool(required and self.rbac.has_permission(user, required))
         return {
-            "authorized": has_perm,
-            "user_id": user.user_id,
+            "authorized": authorized,
             "role": user.role.value,
-            "action": action,
-            "reason": "Permission granted" if has_perm else f"Missing {permission.value if permission else 'unknown'}"
+            "required_permission": required.value if required else None,
         }
-    
-    @staticmethod
-    def retrieve_rag_evidence(jd_id: str, candidate_ids: List[str], top_k: int = 5) -> Dict[str, any]:
-        """Retrieve evidence chunks from ChromaDB"""
+
+    def compute_deterministic_score(
+        self,
+        jd_id: str,
+        candidate_ids: List[str],
+        weights: Dict[str, float],
+    ) -> Dict[str, Any]:
+        scoring_weights = ScoringWeights(
+            weight_must_have=float(weights.get("must_have", 0.4)),
+            weight_nice_to_have=float(weights.get("nice_to_have", 0.2)),
+            weight_experience=float(weights.get("experience", 0.2)),
+            weight_domain=float(weights.get("domain", 0.1)),
+            weight_ambiguity_penalty=float(weights.get("ambiguity", 0.1)),
+        )
+        engine = DeterministicScoringEngine(scoring_weights)
+        jd = self.repository.jd_features(jd_id)
+        scores = []
+        for candidate_id in candidate_ids:
+            resume = self.repository.resume_features(candidate_id)
+            scores.append(score_to_dict(candidate_id, engine.compute_score(jd, resume)))
+        scores.sort(key=lambda item: item["score"], reverse=True)
+        return {"scores": scores}
+
+    def retrieve_rag_evidence(self, jd_id: str, candidate_ids: List[str], top_k: int) -> Dict[str, Any]:
         return {
             "jd_id": jd_id,
-            "evidence": [
+            "top_k": top_k,
+            "evidence": self.repository.retrieve_evidence(jd_id, candidate_ids, top_k),
+        }
+
+    def call_mcp_explainer(
+        self,
+        user: User,
+        context: List[Dict[str, Any]],
+        scores: List[Dict[str, Any]],
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        from mcp_server.main import MCPExplainRequest, explain
+
+        request = MCPExplainRequest(
+            role=user.role,
+            model=config.get("llm_model", "gpt-4o-mini"),
+            provider=config.get("provider", "openai"),
+            temperature=float(config.get("temperature", 0.2)),
+            max_tokens=int(config.get("max_tokens", 500)),
+            guardrail_strictness=config.get("guardrail_strictness", "HIGH"),
+            score_summary=scores,
+            retrieved_context=context,
+            policy=self.repository.active_policy_text(),
+        )
+
+        import asyncio
+
+        response = asyncio.run(explain(request)) if not _inside_event_loop() else None
+        if response is None:
+            raise RuntimeError("MCP explain must be invoked through async path")
+        payload = response.model_dump()
+        self.repository.log_usage(user.user_id, user.role.value, request.model, payload["token_usage"])
+        return payload
+
+    async def call_mcp_explainer_async(
+        self,
+        user: User,
+        context: List[Dict[str, Any]],
+        scores: List[Dict[str, Any]],
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        from mcp_server.main import MCPExplainRequest, explain
+
+        request = MCPExplainRequest(
+            role=user.role,
+            model=config.get("llm_model", "gpt-4o-mini"),
+            provider=config.get("provider", "openai"),
+            temperature=float(config.get("temperature", 0.2)),
+            max_tokens=int(config.get("max_tokens", 500)),
+            guardrail_strictness=config.get("guardrail_strictness", "HIGH"),
+            score_summary=scores,
+            retrieved_context=context,
+            policy=self.repository.active_policy_text(),
+        )
+        response = await explain(request)
+        payload = response.model_dump()
+        self.repository.log_usage(user.user_id, user.role.value, request.model, payload["token_usage"])
+        return payload
+
+    def log_audit_event(self, user_id: str, action: str, details: Dict[str, Any]) -> Dict[str, Any]:
+        return self.repository.log_audit(user_id, action, details)
+
+    def assemble_response(
+        self,
+        scores: List[Dict[str, Any]],
+        explanations: Dict[str, Any],
+        evidence: List[Dict[str, Any]],
+        audit_id: str,
+    ) -> Dict[str, Any]:
+        explanations_by_candidate = {
+            item["candidate_id"]: item for item in explanations.get("output", [])
+        }
+        evidence_by_candidate = {item["candidate_id"]: item.get("chunks", []) for item in evidence}
+        results = []
+        for score in scores:
+            candidate_id = score["candidate_id"]
+            results.append(
                 {
-                    "candidate_id": cid,
-                    "chunks": [
-                        {"text": f"Mock evidence for {cid}", "similarity": 0.85, "chunk_id": f"ch_{i}"}
-                        for i in range(min(top_k, 3))
-                    ]
+                    **score,
+                    "explanation": explanations_by_candidate.get(candidate_id, {}),
+                    "evidence_chunks": evidence_by_candidate.get(candidate_id, []),
+                    "policy_compliance_badge": "passed"
+                    if explanations.get("status") == "success"
+                    else "blocked",
+                    "audit_id": audit_id,
                 }
-                for cid in candidate_ids[:5]  # Top 5 candidates
-            ]
-        }
-    
-    @staticmethod
-    def compute_deterministic_score(jd_features: Dict, resume_features: Dict, weights: Dict) -> Dict[str, any]:
-        """Compute candidate-JD match score"""
-        # Mock scoring
-        base_score = 0.75
+            )
         return {
-            "scores": [
-                {
-                    "candidate_id": resume_features.get("candidate_id", "unknown"),
-                    "score": base_score,
-                    "breakdown": {
-                        "must_have_match": 0.85,
-                        "nice_to_have_match": 0.70,
-                        "experience_match": 0.80,
-                        "domain_relevance": 0.60,
-                        "ambiguity_penalty": 0.05
-                    }
-                }
-            ]
-        }
-    
-    @staticmethod
-    def call_mcp_explainer(context: Dict, scores: List[Dict], policy: str, max_tokens: int) -> Dict[str, any]:
-        """Request LLM explanation from MCP Server"""
-        return {
-            "explanations": [
-                {
-                    "candidate_id": score.get("candidate_id"),
-                    "explanation": f"Mock explanation for {score.get('candidate_id')}",
-                    "evidence": ["Mock evidence 1", "Mock evidence 2"],
-                    "tokens_used": 150
-                }
-                for score in scores[:3]
-            ]
-        }
-    
-    @staticmethod
-    def log_audit_event(user_id: str, action: str, inputs: Dict, outputs: Dict) -> Dict[str, any]:
-        """Log event to audit trail"""
-        return {
-            "audit_id": f"aud_{uuid.uuid4().hex[:8]}",
-            "user_id": user_id,
-            "action": action,
-            "timestamp": datetime.utcnow().isoformat(),
-            "recorded": True
-        }
-    
-    @staticmethod
-    def assemble_response(scores: List[Dict], explanations: Dict, audit_id: str) -> Dict[str, any]:
-        """Assemble final structured response"""
-        return {
-            "results": scores,
-            "explanations": explanations.get("explanations", []),
+            "results": results,
+            "mcp_status": explanations.get("status"),
+            "token_usage": explanations.get("token_usage", {}),
             "audit_id": audit_id,
-            "status": "success"
+            "label": "Screening Aid - Not a Hiring Decision Tool",
         }
+
+
+def _inside_event_loop() -> bool:
+    try:
+        import asyncio
+
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
 
 
 class TalentFitOrchestrationAgent:
-    """
-    Main orchestration agent.
-    
-    Responsibilities (YES):
-    ✓ Validate user role & permissions
-    ✓ Trigger deterministic scoring engine
-    ✓ Request RAG retrieval from ChromaDB
-    ✓ Forward context to MCP Server
-    ✓ Enforce guardrails before/after LLM calls
-    ✓ Assemble final structured response
-    ✓ Log full decision trail
-    
-    Restrictions (NO):
-    ✗ Cannot score candidates
-    ✗ Cannot rank candidates
-    ✗ Cannot modify deterministic scores
-    ✗ Cannot make hiring decisions
-    """
-    
-    def __init__(self, tool_executor=None):
-        self.tool_executor = tool_executor or MockToolExecutor()
+    def __init__(self, repository: InMemoryTalentRepository, tool_executor: Optional[TalentFitToolExecutor] = None):
+        self.repository = repository
+        self.tool_executor = tool_executor or TalentFitToolExecutor(repository)
         self.execution_trace: Optional[AgentExecutionTrace] = None
-    
+
     async def run_screening_workflow(
         self,
         user: User,
         jd_id: str,
         candidate_ids: List[str],
-        config: Dict[str, any]
-    ) -> Dict[str, any]:
-        """
-        Execute complete screening workflow.
-        
-        Args:
-            user: Authenticated user
-            jd_id: Job description ID
-            candidate_ids: Candidate IDs to screen
-            config: System configuration
-            
-        Returns:
-            Structured result with scores, explanations, audit trail
-        """
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
         self.execution_trace = AgentExecutionTrace(
             user_id=user.user_id,
             user_role=user.role,
-            action="run_screening_workflow"
+            action="run_screening_workflow",
         )
-        
+
         try:
-            # Step 1: Validate permissions
-            self._log(f"Step 1: Validating user permissions")
-            self._invoke_tool(
+            validation = self._invoke_tool(
                 AgentToolName.VALIDATE_USER_POLICY,
                 {"user": user, "action": "run_screening"},
-                self.tool_executor.validate_user_policy
+                self.tool_executor.validate_user_policy,
             )
-            
-            # Step 2: Check tool constraints
-            self._log(f"Step 2: Checking tool constraints for {user.role.value}")
-            constraint = AgentToolConstraint(user)
-            if not constraint.can_invoke(AgentToolName.RETRIEVE_RAG_EVIDENCE.value):
-                raise AgentToolConstraintViolation(
-                    user_id=user.user_id,
-                    tool_name=AgentToolName.RETRIEVE_RAG_EVIDENCE.value,
-                    role=user.role
-                )
-            
-            # Step 3: Retrieve evidence
-            self._log(f"Step 3: Retrieving RAG evidence for JD {jd_id}")
-            evidence_result = self._invoke_tool(
+            if not validation.get("authorized"):
+                raise PermissionError("User is not authorized to run screening")
+
+            for tool in [
+                AgentToolName.COMPUTE_DETERMINISTIC_SCORE,
                 AgentToolName.RETRIEVE_RAG_EVIDENCE,
-                {"jd_id": jd_id, "candidate_ids": candidate_ids, "top_k": config.get("top_k", 5)},
-                self.tool_executor.retrieve_rag_evidence
-            )
-            
-            # Step 4: Compute scores
-            self._log(f"Step 4: Computing deterministic scores")
-            scoring_result = self._invoke_tool(
+                AgentToolName.CALL_MCP_EXPLAINER,
+                AgentToolName.LOG_AUDIT_EVENT,
+                AgentToolName.ASSEMBLE_RESPONSE,
+            ]:
+                self._ensure_tool_allowed(user, tool)
+
+            scoring = self._invoke_tool(
                 AgentToolName.COMPUTE_DETERMINISTIC_SCORE,
                 {
-                    "jd_features": {"jd_id": jd_id},
-                    "resume_features": {"candidate_ids": candidate_ids},
-                    "weights": config.get("scoring_weights", {})
+                    "jd_id": jd_id,
+                    "candidate_ids": candidate_ids,
+                    "weights": config.get("scoring_weights", {}),
                 },
-                self.tool_executor.compute_deterministic_score
+                self.tool_executor.compute_deterministic_score,
             )
-            
-            # Step 5: Request LLM explanations
-            self._log(f"Step 5: Requesting LLM explanations from MCP Server")
-            explanations_result = self._invoke_tool(
+            evidence = self._invoke_tool(
+                AgentToolName.RETRIEVE_RAG_EVIDENCE,
+                {"jd_id": jd_id, "candidate_ids": candidate_ids, "top_k": int(config.get("top_k", 5))},
+                self.tool_executor.retrieve_rag_evidence,
+            )
+
+            explanations = await self._invoke_tool_async(
                 AgentToolName.CALL_MCP_EXPLAINER,
                 {
-                    "context": evidence_result.get("evidence", []),
-                    "scores": scoring_result.get("scores", []),
-                    "policy": config.get("policy", ""),
-                    "max_tokens": config.get("max_tokens", 300)
+                    "user": user,
+                    "context": evidence["evidence"],
+                    "scores": scoring["scores"],
+                    "config": config,
                 },
-                self.tool_executor.call_mcp_explainer
+                self.tool_executor.call_mcp_explainer_async,
             )
-            
-            # Step 6: Log audit event
-            self._log(f"Step 6: Logging audit event")
-            audit_result = self._invoke_tool(
+            audit = self._invoke_tool(
                 AgentToolName.LOG_AUDIT_EVENT,
                 {
                     "user_id": user.user_id,
-                    "action": "run_screening",
-                    "inputs": {"jd_id": jd_id, "candidate_count": len(candidate_ids)},
-                    "outputs": {"scores_computed": len(scoring_result.get("scores", []))}
+                    "action": "screening_completed",
+                    "details": {
+                        "jd_id": jd_id,
+                        "candidate_count": len(candidate_ids),
+                        "mcp_status": explanations.get("status"),
+                    },
                 },
-                self.tool_executor.log_audit_event
+                self.tool_executor.log_audit_event,
             )
-            
-            # Step 7: Assemble response
-            self._log(f"Step 7: Assembling final response")
-            final_result = self._invoke_tool(
+            final = self._invoke_tool(
                 AgentToolName.ASSEMBLE_RESPONSE,
                 {
-                    "scores": scoring_result.get("scores", []),
-                    "explanations": explanations_result,
-                    "audit_id": audit_result.get("audit_id")
+                    "scores": scoring["scores"],
+                    "explanations": explanations,
+                    "evidence": evidence["evidence"],
+                    "audit_id": audit["audit_id"],
                 },
-                self.tool_executor.assemble_response
+                self.tool_executor.assemble_response,
             )
-            
-            self._log("Workflow completed successfully")
+
             self.execution_trace.success = True
-            self.execution_trace.final_output = final_result
-            
-            return {
-                "success": True,
-                "data": final_result,
-                "audit_trail": self.execution_trace.to_dict()
-            }
-        
-        except Exception as e:
-            self._log(f"ERROR: {str(e)}", is_error=True)
+            self.execution_trace.final_output = final
+            return {"success": True, "data": final, "audit_trail": self.execution_trace.to_dict()}
+        except Exception as exc:
             self.execution_trace.success = False
-            self.execution_trace.error = str(e)
-            
-            return {
-                "success": False,
-                "error": str(e),
-                "audit_trail": self.execution_trace.to_dict()
-            }
-        
+            self.execution_trace.error = str(exc)
+            return {"success": False, "error": str(exc), "audit_trail": self.execution_trace.to_dict()}
         finally:
             self.execution_trace.completed_at = datetime.utcnow()
-    
-    def _invoke_tool(
-        self,
-        tool_name: AgentToolName,
-        params: Dict[str, any],
-        executor_func
-    ) -> Dict[str, any]:
-        """
-        Invoke a tool with constraint checking and timing.
-        
-        Args:
-            tool_name: Tool to invoke
-            params: Input parameters
-            executor_func: Function to execute
-            
-        Returns:
-            Tool output
-        """
-        import time
-        
-        start_time = time.time()
-        
+
+    def _ensure_tool_allowed(self, user: User, tool: AgentToolName) -> None:
+        constraint = AgentToolConstraint(user)
+        if not constraint.can_invoke(tool.value):
+            raise AgentToolConstraintViolation(user.user_id, tool.value, user.role)
+
+    def _invoke_tool(self, tool_name: AgentToolName, params: Dict[str, Any], executor_func) -> Dict[str, Any]:
+        started = time.time()
         try:
             output = executor_func(**params)
-            duration_ms = (time.time() - start_time) * 1000
-            
-            invocation = ToolInvocation(
-                tool_name=tool_name,
-                input_params=params,
-                output=output,
-                duration_ms=duration_ms,
-                success=True
+            self.execution_trace.tool_invocations.append(
+                ToolInvocation(tool_name, params, output, (time.time() - started) * 1000, True)
             )
-            self.execution_trace.tool_invocations.append(invocation)
-            
             return output
-        
-        except Exception as e:
-            duration_ms = (time.time() - start_time) * 1000
-            invocation = ToolInvocation(
-                tool_name=tool_name,
-                input_params=params,
-                output={},
-                duration_ms=duration_ms,
-                success=False,
-                error=str(e)
+        except Exception as exc:
+            self.execution_trace.tool_invocations.append(
+                ToolInvocation(tool_name, params, {}, (time.time() - started) * 1000, False, str(exc))
             )
-            self.execution_trace.tool_invocations.append(invocation)
             raise
-    
-    def _log(self, message: str, is_error: bool = False):
-        """Log message to execution trace"""
-        level = "ERROR" if is_error else "INFO"
-        timestamp = datetime.utcnow().isoformat()
-        print(f"[{timestamp}] {level}: {message}")
 
-
-# Example usage with RBAC
-if __name__ == "__main__":
-    import asyncio
-    
-    async def demo():
-        # Create mock users
-        recruiter = User(user_id="u_001", email="recruiter@company.com", role=Role.RECRUITER)
-        admin = User(user_id="u_admin", email="admin@company.com", role=Role.ADMIN)
-        
-        # Initialize agent
-        agent = TalentFitOrchestrationAgent()
-        
-        # Run screening workflow
-        print("=== RECRUITING WORKFLOW ===\n")
-        result = await agent.run_screening_workflow(
-            user=recruiter,
-            jd_id="jd_001",
-            candidate_ids=["c_042", "c_089", "c_156"],
-            config={"top_k": 5, "max_tokens": 300}
-        )
-        
-        print(f"\nResult: {'SUCCESS' if result['success'] else 'FAILED'}")
-        print(f"\nExecution Trace (sample):")
-        trace = result['audit_trail']
-        print(f"  Execution ID: {trace['execution_id']}")
-        print(f"  User: {trace['user_id']} ({trace['user_role']})")
-        print(f"  Tool Invocations: {len(trace['tool_invocations'])}")
-        for inv in trace['tool_invocations'][:3]:
-            print(f"    - {inv['tool_name']}: {inv['duration_ms']:.1f}ms")
-    
-    asyncio.run(demo())
-
-
-# Import RBAC at bottom to avoid circular imports
-from backend.auth.rbac import RBACEnforcer
+    async def _invoke_tool_async(self, tool_name: AgentToolName, params: Dict[str, Any], executor_func) -> Dict[str, Any]:
+        started = time.time()
+        try:
+            output = await executor_func(**params)
+            self.execution_trace.tool_invocations.append(
+                ToolInvocation(tool_name, params, output, (time.time() - started) * 1000, True)
+            )
+            return output
+        except Exception as exc:
+            self.execution_trace.tool_invocations.append(
+                ToolInvocation(tool_name, params, {}, (time.time() - started) * 1000, False, str(exc))
+            )
+            raise

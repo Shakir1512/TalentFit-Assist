@@ -1,0 +1,100 @@
+# Fairness & Non-Discrimination Policy v1.0
+
+## Purpose
+This policy ensures that AI-assisted screening decisions are made fairly, transparently, and in compliance with all applicable employment laws and company values. The system assists humans in decision-making but never makes hiring decisions autonomously.
+
+## Core Principles
+
+### 1. Non-Discrimination
+- Screening MUST be based solely on job-related qualifications, skills, experience, and abilities
+- NO consideration of protected attributes or characteristics:
+  - Age (birth date, graduation year, "digital native", "millennial", etc.)
+  - Gender, gender identity, or sexual orientation
+  - Race, color, ethnicity, or national origin
+  - Religion or spiritual beliefs
+  - Disability status (physical, mental, cognitive)
+  - Military/veteran status
+  - Marital/family status
+  - Genetic information
+  - Any other protected class
+
+### 2. Evidence-Based Evaluation
+- All screening scores must be justified with concrete evidence from submitted documents
+- Evidence must reference specific skills, years of experience, or demonstrated abilities
+- Inferences about capabilities based on demographics are prohibited
+- Ambiguity in candidate qualifications must be clearly flagged for human review
+
+### 3. Transparency
+- Every candidate receives a clear scoring breakdown
+- All evidence citations must include source document and location
+- Interview focus areas must be grounded in job requirements, not assumptions
+- Adverse actions (low scores) must include gap explanations
+
+### 4. Human Decision Authority
+- The system provides scoring and explanations, not recommendations
+- Final hiring decisions remain with human recruiters and hiring managers
+- System users cannot override or circumvent fairness guardrails
+- Exception decisions require audit trail and manager approval
+
+## Prohibited Practices
+
+### Do NOT:
+- Use education institution prestige as a scoring factor
+- Consider candidate appearance, photo, or personal presentation
+- Make assumptions based on name, pronunciation, or perceived origin
+- Penalize employment gaps without business justification
+- Use "culture fit" as a screening factor (grounds for unconscious bias)
+- Infer protected attributes from resume information
+- Weight factors differently based on candidate demographics
+
+### Examples of Violations:
+❌ "Stanford degree → better candidate" (prestige bias)
+❌ "5-year gap → assumes caregiving duties" (family status inference)
+❌ "Name sounds foreign → less American experience" (national origin bias)
+❌ "Military service → leadership potential" (stereotyping)
+❌ "Young graduate → tech-savvy" (age assumption)
+
+## Required Practices
+
+### DO:
+✅ Compare candidates using identical scoring criteria
+✅ Evaluate skills against job requirements only
+✅ Document all scoring factors with evidence
+✅ Flag ambiguous or unclear candidate information
+✅ Report any system anomalies or potential bias
+✅ Ensure candidate privacy and data security
+✅ Maintain audit trails of all screening activities
+
+### Examples of Compliant Screening:
+✅ "JD requires 5+ years Python; candidate has 7 years → score 0.9"
+✅ "Experience gap noted; unclear if related to domain shift or job search"
+✅ "5 years in e-commerce, 2 in retail tech = 7 years relevant domain experience"
+✅ "Skills match: has 4/5 must-haves; missing Kubernetes (nice-to-have)"
+
+## Data Protection
+
+- NO personal information retained beyond 30 days unless required by law
+- Protected attributes are stripped at ingestion (one-time permanent removal)
+- Even system administrators cannot access removed data
+- All uploads encrypted in transit (TLS 1.3) and at rest (AES-256)
+- Candidate data isolated by recruiter (no cross-org data leakage)
+
+## Monitoring & Compliance
+
+- Weekly bias detection scans on scoring patterns
+- Monthly reports on score distributions by role
+- Quarterly fairness audits with legal review
+- Any suspicious patterns trigger immediate investigation
+- Violations documented and reported to Compliance
+
+## Accountability
+
+- All system users must acknowledge this policy annually
+- Violations may result in access revocation or employment action
+- Candidates have right to request their screening explanation
+- Legal holds and discovery processes respected automatically
+
+## Questions?
+
+Contact: compliance@company.com
+Policy Version: 1.0 | Effective Date: 2026-04-01 | Last Updated: 2026-04-26
