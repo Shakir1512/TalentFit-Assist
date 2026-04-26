@@ -205,8 +205,9 @@ async def upload_jd(
 ) -> Dict[str, Any]:
     require(user, Permission.UPLOAD_DOCUMENTS)
     processed = repository.ingest_records("jd", request.documents)
-    repository.log_audit(user.user_id, "jd_uploaded", {"count": len(processed)})
-    return {"status": "success", "uploaded": len(processed), "processed": processed}
+    jd_ids = list(processed.keys())
+    repository.log_audit(user.user_id, "jd_uploaded", {"count": len(processed), "jd_ids": jd_ids})
+    return {"status": "success", "uploaded": len(processed), "count": len(processed), "jd_ids": jd_ids, "processed": processed}
 
 
 @app.post("/upload/resume")
@@ -216,8 +217,9 @@ async def upload_resume(
 ) -> Dict[str, Any]:
     require(user, Permission.UPLOAD_DOCUMENTS)
     processed = repository.ingest_records("resume", request.documents)
-    repository.log_audit(user.user_id, "resume_uploaded", {"count": len(processed)})
-    return {"status": "success", "uploaded": len(processed), "processed": processed}
+    candidate_ids = list(processed.keys())
+    repository.log_audit(user.user_id, "resume_uploaded", {"count": len(processed), "candidate_ids": candidate_ids})
+    return {"status": "success", "uploaded": len(processed), "count": len(processed), "candidate_ids": candidate_ids, "processed": processed}
 
 
 @app.post("/upload/policy")
@@ -226,6 +228,37 @@ async def upload_policy(request: PolicyUploadRequest, user: User = Depends(curre
     processed = repository.ingest_policy_markdown(request.content, request.policy_id)
     repository.log_audit(user.user_id, "policy_uploaded", {"policy_id": request.policy_id})
     return {"status": "success", "processed": processed}
+
+
+@app.get("/uploads/jds")
+async def list_uploaded_jds(user: User = Depends(current_user)) -> Dict[str, Any]:
+    """List all uploaded Job Descriptions"""
+    require(user, Permission.UPLOAD_DOCUMENTS)
+    jds = {}
+    for jd_id, doc in repository.documents["jd"].items():
+        jds[jd_id] = {
+            "title": doc.get("title", "N/A"),
+            "company": doc.get("company", "N/A"),
+            "domain": doc.get("domain", "N/A"),
+            "uploaded_at": doc.get("uploaded_at", "N/A"),
+        }
+    return {"status": "success", "jds": jds, "count": len(jds)}
+
+
+@app.get("/uploads/candidates")
+async def list_uploaded_candidates(user: User = Depends(current_user)) -> Dict[str, Any]:
+    """List all uploaded Candidate Resumes"""
+    require(user, Permission.UPLOAD_DOCUMENTS)
+    candidates = {}
+    for candidate_id, doc in repository.documents["resume"].items():
+        candidates[candidate_id] = {
+            "name": doc.get("name", doc.get("candidate_id", "N/A")),
+            "email": doc.get("email", "N/A"),
+            "years_of_experience": doc.get("years_of_experience", "N/A"),
+            "domain": doc.get("domain", "N/A"),
+            "uploaded_at": doc.get("uploaded_at", "N/A"),
+        }
+    return {"status": "success", "candidates": candidates, "count": len(candidates)}
 
 
 @app.post("/screen/run", response_model=ScreeningResponse)

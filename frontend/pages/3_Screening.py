@@ -49,13 +49,13 @@ def render_header(title: str) -> None:
 
 
 require_login()
-st.title("🎯 Run Screening")
+st.title("Run Screening")
 
 if not has_capability("can_run_screening"):
-    st.error("❌ Running screenings requires Admin or Recruiter role.")
+    st.error("Running screenings requires Admin or Recruiter role.")
     st.stop()
 
-st.info("📋 Run deterministic screening to evaluate candidate fit with job descriptions.")
+st.info("Run deterministic screening to evaluate candidate fit with job descriptions. Select from your uploaded documents.")
 
 st.markdown("""
 <style>
@@ -65,16 +65,58 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Get uploaded JDs and candidates
+try:
+    jds_response = api_request("GET", "/uploads/jds")
+    available_jds = jds_response.get("jds", {})
+    jd_ids = list(available_jds.keys())
+except Exception as e:
+    st.error(f"Failed to fetch uploaded JDs: {e}")
+    available_jds = {}
+    jd_ids = []
+
+try:
+    candidates_response = api_request("GET", "/uploads/candidates")
+    available_candidates = candidates_response.get("candidates", {})
+    candidate_ids = list(available_candidates.keys())
+except Exception as e:
+    st.error(f"Failed to fetch uploaded candidates: {e}")
+    available_candidates = {}
+    candidate_ids = []
+
+# Check if documents are uploaded
+if not jd_ids:
+    st.warning("No Job Descriptions uploaded yet. Go to Document Uploads to upload JDs first.")
+    st.stop()
+
+if not candidate_ids:
+    st.warning("No Resumes uploaded yet. Go to Document Uploads to upload resumes first.")
+    st.stop()
+
+# Initialize variables
+selected_jd = None
+selected_candidates = []
+top_k = 5
+include_explanation = True
+submitted = False
+
 with st.form("screening"):
     col1, col2 = st.columns([1, 2])
+    
     with col1:
-        jd_id = st.text_input("Job ID", value="jd_001", placeholder="e.g., jd_001")
+        # Select JD from uploaded list
+        selected_jd = st.selectbox(
+            "Select Job Description",
+            jd_ids,
+            format_func=lambda x: f"{x} - {available_jds[x].get('title', 'N/A')}"
+        )
+    
     with col2:
-        candidate_ids_input = st.text_area(
-            "Candidate IDs (one per line)",
-            value="cand_001\ncand_002",
-            height=100,
-            placeholder="cand_001\ncand_002\ncand_003"
+        # Multi-select candidates from uploaded list
+        selected_candidates = st.multiselect(
+            "Select Candidates to Screen",
+            candidate_ids,
+            format_func=lambda x: f"{x} - {available_candidates[x].get('name', 'N/A')}"
         )
     
     st.divider()
@@ -85,98 +127,93 @@ with st.form("screening"):
     with col2:
         include_explanation = st.checkbox("Generate LLM Explanation", value=True, help="Request AI-generated explanation of results")
     
-    submitted = st.form_submit_button("🚀 Run Screening", use_container_width=True)
+    submitted = st.form_submit_button("Run Screening", use_container_width=True)
 
-if submitted:
-    candidate_ids = [item.strip() for item in candidate_ids_input.splitlines() if item.strip()]
+if submitted and selected_candidates:
+    payload = {
+        "jd_id": selected_jd,
+        "candidate_ids": selected_candidates,
+        "config_overrides": {"top_k": top_k},
+        "generate_explanation": include_explanation,
+    }
     
-    if not candidate_ids:
-        st.error("❌ Please enter at least one candidate ID")
-    else:
-        payload = {
-            "jd_id": jd_id,
-            "candidate_ids": candidate_ids,
-            "config_overrides": {"top_k": top_k},
-            "generate_explanation": include_explanation,
-        }
-        
-        with st.spinner("🔄 Running screening..."):
-            try:
-                result = api_request("POST", "/screen/run", json=payload)
+    with st.spinner("Running screening..."):
+        try:
+            result = api_request("POST", "/screen/run", json=payload)
+            
+            st.success("Screening Complete")
+            
+            # Summary metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Screening ID", result.get("screening_id", "N/A")[-8:])
+            with col2:
+                st.metric("Candidates", len(result.get("results", [])))
+            with col3:
+                avg_score = sum([r.get("score", 0) for r in result.get("results", [])]) / max(len(result.get("results", [])), 1)
+                st.metric("Avg Score", f"{avg_score:.1%}")
+            with col4:
+                st.metric("Est. Cost", f"${result.get('cost_estimate', 0):.4f}")
+            
+            st.divider()
+            
+            # Results for each candidate
+            st.markdown("### Candidate Results")
+            
+            for idx, row in enumerate(result.get("results", []), 1):
+                candidate_id = row.get("candidate_id", f"Candidate {idx}")
+                score = row.get("score", 0)
                 
-                st.success(f"✅ Screening Complete")
+                # Score badge color based on value
+                if score >= 0.75:
+                    score_color = "#28a745"  # Green
+                    score_label = "Strong Match"
+                elif score >= 0.50:
+                    score_color = "#ffc107"  # Yellow
+                    score_label = "Moderate Match"
+                else:
+                    score_color = "#dc3545"  # Red
+                    score_label = "Weak Match"
                 
-                # Summary metrics
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Screening ID", result.get("screening_id", "N/A")[-8:])
-                with col2:
-                    st.metric("Candidates", len(result.get("results", [])))
-                with col3:
-                    avg_score = sum([r.get("score", 0) for r in result.get("results", [])]) / max(len(result.get("results", [])), 1)
-                    st.metric("Avg Score", f"{avg_score:.1%}")
-                with col4:
-                    st.metric("Est. Cost", f"${result.get('cost_estimate', 0):.4f}")
-                
-                st.divider()
-                
-                # Results for each candidate
-                st.markdown("### 👥 Candidate Results")
-                
-                for idx, row in enumerate(result.get("results", []), 1):
-                    candidate_id = row.get("candidate_id", f"Candidate {idx}")
-                    score = row.get("score", 0)
+                with st.expander(f"**{candidate_id}** — {score_label} ({score:.1%})"):
+                    # Score breakdown
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        st.markdown(f"**Overall Score:** {score:.1%}")
+                        breakdown = row.get("breakdown", {})
+                        if breakdown:
+                            df_breakdown = pd.DataFrame([
+                                {"Factor": k.replace('_', ' ').title(), "Score": f"{v:.1%}"}
+                                for k, v in breakdown.items()
+                            ])
+                            st.dataframe(df_breakdown, use_container_width=True, hide_index=True)
                     
-                    # Score badge color based on value
-                    if score >= 0.75:
-                        score_color = "#28a745"  # Green
-                        score_label = "🟢 Strong Match"
-                    elif score >= 0.50:
-                        score_color = "#ffc107"  # Yellow
-                        score_label = "🟡 Moderate Match"
-                    else:
-                        score_color = "#dc3545"  # Red
-                        score_label = "🔴 Weak Match"
+                    with col2:
+                        compliance = row.get("policy_compliance_badge", "PASS")
+                        if compliance == "PASS":
+                            st.markdown("✅ Policy Compliant")
+                        else:
+                            st.markdown(f"⚠️ {compliance}")
                     
-                    with st.expander(f"**{candidate_id}** — {score_label} ({score:.1%})"):
-                        # Score breakdown
-                        col1, col2 = st.columns([2, 1])
-                        with col1:
-                            st.markdown(f"**Overall Score:** {score:.1%}")
-                            breakdown = row.get("breakdown", {})
-                            if breakdown:
-                                df_breakdown = pd.DataFrame([
-                                    {"Factor": k.replace('_', ' ').title(), "Score": f"{v:.1%}"}
-                                    for k, v in breakdown.items()
-                                ])
-                                st.dataframe(df_breakdown, use_container_width=True, hide_index=True)
+                    st.divider()
+                    
+                    # Summary explanation
+                    explanation = row.get("explanation", {})
+                    if explanation and include_explanation:
+                        st.markdown("**Summary:**")
+                        st.write(explanation.get("summary", "No summary available."))
                         
-                        with col2:
-                            compliance = row.get("policy_compliance_badge", "PASS")
-                            if compliance == "PASS":
-                                st.markdown("✅ Policy Compliant")
-                            else:
-                                st.markdown(f"⚠️ {compliance}")
-                        
-                        st.divider()
-                        
-                        # Summary explanation
-                        explanation = row.get("explanation", {})
-                        if explanation and include_explanation:
-                            st.markdown("**Summary:**")
-                            st.write(explanation.get("summary", "No summary available."))
-                            
-                            # Evidence cards
-                            st.markdown("**Key Evidence:**")
-                            evidence_cards = explanation.get("evidence_cards", [])
-                            if evidence_cards:
-                                for card in evidence_cards[:3]:  # Show top 3 pieces
-                                    st.markdown(f"- {card.get('text', 'No text')}")
-                
-                # Store for later reference
-                st.session_state["last_screening_id"] = result.get("screening_id")
-                st.markdown("---")
-                st.caption(f"Screening saved with ID: {result.get('screening_id')}")
-                
-            except Exception as exc:
-                st.error(f"❌ Screening failed: {exc}")
+                        # Evidence cards
+                        st.markdown("**Key Evidence:**")
+                        evidence_cards = explanation.get("evidence_cards", [])
+                        if evidence_cards:
+                            for card in evidence_cards[:3]:  # Show top 3 pieces
+                                st.markdown(f"- {card.get('text', 'No text')}")
+            
+            # Store for later reference
+            st.session_state["last_screening_id"] = result.get("screening_id")
+            st.markdown("---")
+            st.caption(f"Screening saved with ID: {result.get('screening_id')}")
+            
+        except Exception as exc:
+            st.error(f"Screening failed: {exc}")
