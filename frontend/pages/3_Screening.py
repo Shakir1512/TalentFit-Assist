@@ -183,7 +183,7 @@ if submitted and selected_candidates:
                         breakdown = row.get("breakdown", {})
                         if breakdown:
                             df_breakdown = pd.DataFrame([
-                                {"Factor": k.replace('_', ' ').title(), "Score": f"{v:.1%}"}
+                                {"Factor": k.replace('_', ' ').title(), "Score": f"{v:.1f}%"}
                                 for k, v in breakdown.items()
                             ])
                             st.dataframe(df_breakdown, use_container_width=True, hide_index=True)

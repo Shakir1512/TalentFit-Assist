@@ -296,47 +296,52 @@ with tab2:
 
 with tab3:
     st.markdown("### Upload Fairness Policy")
-    st.markdown("Define screening policies and fairness rules.")
     
-    policy_file = st.file_uploader(
-        "Choose policy file (TXT, PDF, or DOCX)",
-        type=["txt", "pdf", "docx"],
-        key="policy_upload"
-    )
-    
-    if policy_file:
-        st.success(f"File selected: {policy_file.name}")
+    if not has_capability("can_edit_config"):
+        st.error("❌ Policy upload requires Admin role.")
+        st.info("Only administrators can define screening policies and fairness rules.")
+    else:
+        st.markdown("Define screening policies and fairness rules.")
         
-        try:
-            if policy_file.name.endswith('.txt'):
-                policy_content = policy_file.read().decode('utf-8')
-            elif policy_file.name.endswith('.pdf'):
-                docs = parse_pdf(policy_file)
-                policy_content = docs[0]['content'] if docs else ""
-            elif policy_file.name.endswith('.docx'):
-                docs = parse_docx(policy_file)
-                policy_content = docs[0]['content'] if docs else ""
-            else:
-                st.error("Unsupported file type")
-                policy_content = ""
+        policy_file = st.file_uploader(
+            "Choose policy file (TXT, PDF, or DOCX)",
+            type=["txt", "pdf", "docx"],
+            key="policy_upload"
+        )
+        
+        if policy_file:
+            st.success(f"File selected: {policy_file.name}")
             
-            if policy_content:
-                st.text_area("Policy Content (preview):", policy_content, height=200, disabled=True)
+            try:
+                if policy_file.name.endswith('.txt'):
+                    policy_content = policy_file.read().decode('utf-8')
+                elif policy_file.name.endswith('.pdf'):
+                    docs = parse_pdf(policy_file)
+                    policy_content = docs[0]['content'] if docs else ""
+                elif policy_file.name.endswith('.docx'):
+                    docs = parse_docx(policy_file)
+                    policy_content = docs[0]['content'] if docs else ""
+                else:
+                    st.error("Unsupported file type")
+                    policy_content = ""
                 
-                if st.button("Upload Policy", key="btn_upload_policy"):
-                    try:
-                        result = api_request(
-                            "POST",
-                            "/upload/policy",
-                            json={"policy_id": "policy_default", "content": policy_content}
-                        )
-                        st.success("Policy uploaded successfully!")
-                        st.markdown(f"**Status:** {result.get('status', 'Success')}")
-                        st.markdown(f"**Policy ID:** {result.get('policy_id', 'policy_default')}")
-                    except Exception as exc:
-                        st.error(f"Upload failed: {exc}")
-        except Exception as exc:
-            st.error(f"File parsing failed: {exc}")
+                if policy_content:
+                    st.text_area("Policy Content (preview):", policy_content, height=200, disabled=True)
+                    
+                    if st.button("Upload Policy", key="btn_upload_policy"):
+                        try:
+                            result = api_request(
+                                "POST",
+                                "/upload/policy",
+                                json={"policy_id": "policy_default", "content": policy_content}
+                            )
+                            st.success("Policy uploaded successfully!")
+                            st.markdown(f"**Status:** {result.get('status', 'Success')}")
+                            st.markdown(f"**Policy ID:** {result.get('policy_id', 'policy_default')}")
+                        except Exception as exc:
+                            st.error(f"Upload failed: {exc}")
+            except Exception as exc:
+                st.error(f"File parsing failed: {exc}")
 
 st.divider()
 st.markdown("""
