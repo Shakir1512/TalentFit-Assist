@@ -1,6 +1,7 @@
 import os
 from typing import Any, Dict, Optional
 
+import json
 import pandas as pd
 import requests
 import streamlit as st
@@ -27,6 +28,31 @@ def api_request(method: str, path: str, **kwargs) -> Any:
             detail = response.text
         raise RuntimeError(detail)
     return response.json()
+
+
+def audit_user_label(record: Dict[str, Any]) -> str:
+    return (
+        record.get("user_email")
+        or (record.get("details") or {}).get("email")
+        or record.get("user_id")
+        or "Unknown"
+    )
+
+
+def audit_status_label(record: Dict[str, Any]) -> str:
+    if record.get("status"):
+        return str(record["status"]).lower()
+    return "success" if record.get("success") else "failure"
+
+
+def audit_details_text(record: Dict[str, Any]) -> str:
+    details = record.get("details", "N/A")
+    if isinstance(details, (dict, list)):
+        details = json.dumps(details, default=str)
+    details_str = str(details)
+    if len(details_str) > 100:
+        return details_str[:100] + "..."
+    return details_str
 
 
 def require_login() -> None:
@@ -131,52 +157,61 @@ with tab2:
             
             if logs.get("records"):
                 # Filter options
+                records = logs["records"]
+                actions = sorted({r.get("action", "unknown") for r in records})
+                users = sorted({audit_user_label(r) for r in records})
+                statuses = sorted({audit_status_label(r) for r in records})
+
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     filter_action = st.selectbox(
                         "Filter by Action",
-                        ["All"] + list(set([r.get("action", "unknown") for r in logs["records"]]))
+                        ["All"] + actions,
                     )
                 with col2:
                     filter_user = st.selectbox(
                         "Filter by User",
-                        ["All"] + list(set([r.get("user_email", "unknown") for r in logs["records"]]))
+                        ["All"] + users,
                     )
                 with col3:
                     filter_status = st.selectbox(
                         "Filter by Status",
-                        ["All"] + list(set([r.get("status", "unknown") for r in logs["records"]]))
+                        ["All"] + statuses,
                     )
-                
+
                 # Apply filters
-                filtered_logs = logs["records"]
+                filtered_logs = records
                 if filter_action != "All":
                     filtered_logs = [r for r in filtered_logs if r.get("action") == filter_action]
                 if filter_user != "All":
-                    filtered_logs = [r for r in filtered_logs if r.get("user_email") == filter_user]
+                    filtered_logs = [r for r in filtered_logs if audit_user_label(r) == filter_user]
                 if filter_status != "All":
-                    filtered_logs = [r for r in filtered_logs if r.get("status") == filter_status]
-                
+                    filtered_logs = [r for r in filtered_logs if audit_status_label(r) == filter_status]
+
                 st.divider()
-                
+
                 # Display logs
                 st.markdown(f"### Showing {len(filtered_logs)} records")
-                
+
                 for log in filtered_logs[:50]:  # Show top 50
-                    status_emoji = "✅" if log.get("status") == "success" else "❌"
-                    
+                    status_label = audit_status_label(log)
+                    status_emoji = "✅" if status_label == "success" else "❌"
+                    user_label = audit_user_label(log)
+                    timestamp = str(log.get("timestamp", "N/A"))
+                    timestamp_prefix = timestamp[:10] if isinstance(timestamp, str) else "N/A"
+
                     with st.expander(
-                        f"{status_emoji} **{log.get('action', 'Unknown')}** — {log.get('user_email', 'Unknown')} — {log.get('timestamp', 'N/A')[:10]}"
+                        f"{status_emoji} **{log.get('action', 'Unknown')}** — {user_label} — {timestamp_prefix}"
                     ):
                         col1, col2 = st.columns(2)
                         with col1:
-                            st.markdown(f"**User:** {log.get('user_email', 'N/A')}")
+                            st.markdown(f"**User:** {user_label}")
                             st.markdown(f"**Action:** {log.get('action', 'N/A')}")
-                            st.markdown(f"**Status:** {log.get('status', 'N/A')}")
+                            st.markdown(f"**Status:** {status_label}")
                         with col2:
-                            st.markdown(f"**Timestamp:** {log.get('timestamp', 'N/A')}")
-                            st.markdown(f"**Details:** {log.get('details', 'N/A')[:100]}...")
-                
+                            st.markdown(f"**Timestamp:** {timestamp}")
+                            st.markdown(f"**Details:** {audit_details_text(log)}")
+
                 if len(filtered_logs) > 50:
                     st.caption(f"Showing 50 of {len(filtered_logs)} records. Load older records in your system.")
             else:
