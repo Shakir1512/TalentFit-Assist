@@ -144,7 +144,7 @@ uvicorn backend.main:app --reload --port 8000
 streamlit run frontend/main.py --server.port 8501
 
 # Terminal 3: MCP Server (optional for full demo)
-python mcp_server/main.py
+python -m mcp_server.main
 ```
 
 **7. Access:**
