@@ -125,17 +125,19 @@ if load_btn and screening_id:
                         interview_focus = explanation.get("interview_focus", [])
                         if interview_focus:
                             for i, focus in enumerate(interview_focus[:3], 1):
-                                st.markdown(f"**{i}. {focus}**")
+                                topic = focus.get("topic", focus) if isinstance(focus, dict) else focus
+                                st.markdown(f"**{i}. {topic}**")
                         else:
                             st.info("No interview focus areas identified.")
-                    
+
                     with col2:
                         # Gaps and concerns
                         st.markdown("#### ⚠️ Gaps & Concerns")
                         gaps = explanation.get("gaps", [])
                         if gaps:
                             for gap in gaps[:3]:
-                                st.markdown(f"• {gap}")
+                                text = gap.get("gap", gap) if isinstance(gap, dict) else gap
+                                st.markdown(f"• {text}")
                         else:
                             st.success("No significant gaps identified.")
                     
@@ -147,15 +149,18 @@ if load_btn and screening_id:
                     if evidence_cards:
                         for card in evidence_cards[:5]:
                             with st.container():
-                                st.markdown(f"**{card.get('title', 'Evidence')}**")
-                                st.caption(card.get("text", "No details"))
+                                claim = card.get("claim", card.get("text", "No details"))
+                                citation = card.get("citation", "")
+                                st.markdown(f"**{claim}**")
+                                if citation:
+                                    st.caption(citation)
                     else:
                         st.info("No evidence details available.")
                     
                     # Policy compliance
                     st.markdown("#### 🛡️ Compliance")
                     compliance = row.get("policy_compliance_badge", "PASS")
-                    if compliance == "PASS":
+                    if compliance in ("PASS", "passed"):
                         st.success("✅ Passes fairness policy")
                     else:
                         st.warning(f"⚠️ Policy flag: {compliance}")

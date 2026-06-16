@@ -89,13 +89,13 @@ with st.form("config"):
         with col1:
             llm_model = st.selectbox(
                 "LLM Model",
-                ["gpt-4o-mini", "gpt-4o", "claude-3-sonnet", "azure-gpt-4o"],
-                index=2
+                ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-5"],
+                index=0
             )
-            provider = st.selectbox(
-                "Provider",
-                ["openai", "azure", "anthropic"],
-                index=2
+            embedding_model = st.selectbox(
+                "Embedding Model",
+                ["text-embedding-3-small", "text-embedding-3-large", "all-MiniLM-L6-v2"],
+                index=0
             )
         with col2:
             temperature = st.slider(
@@ -110,12 +110,6 @@ with st.form("config"):
                 int(current.get("max_tokens", 1500)),
                 50
             )
-        
-        embedding_model = st.selectbox(
-            "Embedding Model",
-            ["text-embedding-3-small", "text-embedding-3-large", "all-MiniLM-L6-v2"],
-            index=0
-        )
 
     # Retrieval Settings
     with st.expander("🔍 Retrieval & Chunking"):
@@ -183,7 +177,6 @@ with st.form("config"):
 if submitted:
     payload = {
         "llm_model": llm_model,
-        "provider": provider,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "embedding_model": embedding_model,
